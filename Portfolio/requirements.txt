@@ -9,3 +9,4 @@ scipy
 yfinance
 plotly
 matplotlib
+shap
