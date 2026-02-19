@@ -1,10 +1,10 @@
 streamlit
 pandas
 numpy
-scikit-learn
-xgboost
 boto3
+sagemaker>=2.197,<3.0.0
+xgboost
+scikit-learn
 yfinance
-matplotlib
 plotly
-seaborn
+matplotlib
