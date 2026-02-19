@@ -5,6 +5,7 @@ boto3
 sagemaker>=2.197,<3.0.0
 xgboost
 scikit-learn
+scipy
 yfinance
 plotly
 matplotlib
