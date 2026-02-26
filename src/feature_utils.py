@@ -32,7 +32,7 @@ def extract_features():
     #Y = np.log(stk_data.loc[:, ('Adj Close', 'MSFT')]).diff(return_period).shift(-return_period)
     #Y.name = Y.name[-1]+'_Future'
     Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
-    Y.name = 'AAPL
+    Y.name = 'AAPL'
     
     X = stk_data.loc[:, ('Adj Close', 'MPWR')]
     X.name = 'MPWR'
@@ -71,5 +71,6 @@ def get_bitcoin_historical_prices(days = 60):
     df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
     df = df[['Date', 'Close Price (USD)']].set_index('Date')
     return df
+
 
 
