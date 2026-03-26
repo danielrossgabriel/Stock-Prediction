@@ -42,7 +42,7 @@ aws_endpoint = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
 # Pair tickers from the notebook (target = NVDA, partner found via cointegration)
 # Update PARTNER_TICKER to match the valid_partner your notebook selected
 TARGET_TICKER = st.secrets.get("aws_credentials", {}).get("TARGET_TICKER", "NVDA")
-PARTNER_TICKER = st.secrets.get("aws_credentials", {}).get("PARTNER_TICKER", "AME")
+PARTNER_TICKER = st.secrets.get("aws_credentials", {}).get("PARTNER_TICKER", "AVGO")
 
 # Signal label mapping
 SIGNAL_MAP = {-1: "🔴 SELL", 0: "🟡 HOLD", 1: "🟢 BUY"}
