@@ -42,7 +42,7 @@ aws_endpoint = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
 # Pair tickers from the notebook (target = NVDA, partner found via cointegration)
 # Update PARTNER_TICKER to match the valid_partner your notebook selected
 TARGET_TICKER = st.secrets.get("aws_credentials", {}).get("TARGET_TICKER", "NVDA")
-PARTNER_TICKER = st.secrets.get("aws_credentials", {}).get("PARTNER_TICKER", "AVGO")
+PARTNER_TICKER = st.secrets.get("aws_credentials", {}).get("PARTNER_TICKER", "AME")
 
 # Signal label mapping
 SIGNAL_MAP = {-1: "🔴 SELL", 0: "🟡 HOLD", 1: "🟢 BUY"}
@@ -137,7 +137,8 @@ def display_explanation(input_df, session, aws_bucket):
 
     st.subheader("🔍 Decision Transparency (SHAP)")
     fig, ax = plt.subplots(figsize=(10, 4))
-    shap.plots.waterfall(shap_values[0], max_display=10)
+    # Multi-output model (SELL/HOLD/BUY) — select first sample, first class
+    shap.plots.waterfall(shap_values[0, :, 0], max_display=10)
     st.pyplot(fig)
 
     # Top feature — fixed typo (was sharp_values, now shap_values)
