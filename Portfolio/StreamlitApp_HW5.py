@@ -57,10 +57,10 @@ df_features = extract_features()
 
 MODEL_INFO = {
         "endpoint": aws_endpoint,
-        "explainer": 'explainer.shap',
-        "pipeline": 'finalized_model.tar.gz',
-        "keys": ["GOOGL", "IBM", "DEXJPUS", "DEXUSUK", "SP500", "DJIA", "VIXCLS"],
-        "inputs": [{"name": k, "type": "number", "min": -1.0, "max": 1.0, "default": 0.0, "step": 0.01} for k in ["GOOGL", "IBM", "DEXJPUS", "DEXUSUK", "SP500", "DJIA", "VIXCLS"]]
+        "explainer": 'explainer_pca.shap',
+        "pipeline": 'finalized_pca_model.tar.gz',
+        "keys": ["NVDA"],
+        "inputs": [{"name": k, "type": "number", "min": 0.0, "default": 100.0, "step": 10.0} for k in ["NVDA"]]
 }
 
 def load_pipeline(_session, bucket, key):
@@ -133,22 +133,22 @@ with st.form("pred_form"):
         with cols[i % 2]:
             user_inputs[inp['name']] = st.number_input(
                 inp['name'].replace('_', ' ').upper(),
-                min_value=inp['min'], max_value=inp['max'], value=inp['default'], step=inp['step']
+                min_value=inp['min'], value=inp['default'], step=inp['step']
             )
     
     submitted = st.form_submit_button("Run Prediction")
 
 if submitted:
 
-    data_row = [user_inputs[k] for k in MODEL_INFO["keys"]]
+    # data_row = [user_inputs[k] for k in MODEL_INFO["keys"]]
     # Prepare data
-    base_df = df_features
-    input_df = pd.concat([base_df, pd.DataFrame([data_row], columns=base_df.columns)])
+    # base_df = df_features
+    # input_df = pd.concat([base_df, pd.DataFrame([data_row], columns=base_df.columns)])
     
-    res, status = call_model_api(input_df)
+    res, status = call_model_api(user_inputs)
     if status == 200:
         st.metric("Prediction Result", res)
-        display_explanation(input_df,session, aws_bucket)
+        display_explanation(user_inputs,session, aws_bucket)
     else:
         st.error(res)
 
