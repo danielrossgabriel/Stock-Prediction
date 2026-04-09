@@ -91,7 +91,15 @@ def convert_input_pca_regression(request_body, request_content_type):
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..'))
-    file_path = os.path.join(project_root, 'Portfolio/SP500Data.csv')
+    candidates = [
+        os.path.join(project_root, 'HW5', 'SP500Data.csv'),
+        os.path.join(project_root, 'Portfolio', 'SP500Data.csv'),
+        os.path.join(project_root, 'SP500Data.csv'),
+        os.path.join(current_dir, 'SP500Data.csv'),
+    ]
+    file_path = next((p for p in candidates if os.path.exists(p)), None)
+    if file_path is None:
+        raise FileNotFoundError(f"SP500Data.csv not found. Looked in: {candidates}")
 
     dataset = pd.read_csv(file_path, index_col=0)
 
@@ -107,7 +115,6 @@ def convert_input_pca_regression(request_body, request_content_type):
     X = np.exp(X).cumsum()
     X.columns = [name + "_CR_Cum" for name in X.columns]
 
-    # Match training: drop all-NaN columns (from full set and from training slice)
     X = X.dropna(axis=1, how='all')
     train_size = int(len(X) * 0.8)
     X_train = X.iloc[:train_size]
