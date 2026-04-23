@@ -1,133 +1,99 @@
-import numpy as np
-import pandas as pd
-import datetime
-import yfinance as yf
-import pandas_datareader.data as web
-import requests
+"""Feature extraction utilities for the HW6 Streamlit app.
+
+Builds the 12-column feature vector that the HW6 regression model was
+trained on in the notebook:
+
+    sentiment_textblob, sentiment_lag1, sentiment_lag2, sentiment_lag3,
+    AAPL, MSFT, AMZN, GOOG, WMT, JPM, TSLA, ADBE
+
+Target ticker is NFLX (excluded from the other-ticker columns).
+"""
+
 import os
-import sys
-import json
-
-from src.Custom_Classes import FeatureEngineer
+import pandas as pd
 
 
-def extract_features():
-
-    return_period = 5
-
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['MSFT', 'IBM', 'GOOGL']
-    ccy_tickers = ['DEXJPUS', 'DEXUSUK']
-    idx_tickers = ['SP500', 'DJIA', 'VIXCLS']
-
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
-    ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
-    idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
-
-    Y = np.log(stk_data.loc[:, ('Adj Close', 'MSFT')]).diff(return_period).shift(-return_period)
-    Y.name = Y.name[-1] + '_Future'
-
-    X1 = np.log(stk_data.loc[:, ('Adj Close', ('GOOGL', 'IBM'))]).diff(return_period)
-    X1.columns = X1.columns.droplevel()
-    X2 = np.log(ccy_data).diff(return_period)
-    X3 = np.log(idx_data).diff(return_period)
-
-    X = pd.concat([X1, X2, X3], axis=1)
-
-    dataset = pd.concat([Y, X], axis=1).dropna().iloc[::return_period, :]
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.columns]
-    dataset.index.name = 'Date'
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    features = features.iloc[:, 1:]
-    return features
+# Columns the HW6 model expects, in order
+TARGET_TICKER = 'NFLX'
+OTHER_TICKERS = ['AAPL', 'MSFT', 'AMZN', 'GOOG', 'WMT', 'JPM', 'TSLA', 'ADBE']
+SENTIMENT_COLS = ['sentiment_textblob', 'sentiment_lag1', 'sentiment_lag2', 'sentiment_lag3']
+FEATURE_COLUMNS = SENTIMENT_COLS + OTHER_TICKERS
 
 
-def extract_features_pair():
-
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['AAPL', 'MPWR']
-
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
-
-    Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
-    Y.name = 'AAPL'
-
-    X = stk_data.loc[:, ('Adj Close', 'MPWR')]
-    X.name = 'MPWR'
-
-    dataset = pd.concat([Y, X], axis=1).dropna()
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.name]
-    dataset.index.name = 'Date'
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    return features
-
-
-def get_bitcoin_historical_prices(days=60):
-
-    BASE_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-
-    params = {
-        'vs_currency': 'usd',
-        'days': days,
-        'interval': 'daily'
-    }
-    response = requests.get(BASE_URL, params=params)
-    data = response.json()
-    prices = data['prices']
-    df = pd.DataFrame(prices, columns=['Timestamp', 'Close Price (USD)'])
-    df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
-    df = df[['Date', 'Close Price (USD)']].set_index('Date')
-    return df
-
-
-def convert_input_pca_regression(request_body, request_content_type):
-    print(f"Receiving data of type: {request_content_type}")
-
+def _find_sentiment_csv():
+    """Look for DataWithSentimentsResults_HW.csv in a few plausible spots."""
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..'))
     candidates = [
-        os.path.join(project_root, 'HW5', 'SP500Data.csv'),
-        os.path.join(project_root, 'Portfolio', 'SP500Data.csv'),
-        os.path.join(project_root, 'SP500Data.csv'),
-        os.path.join(current_dir, 'SP500Data.csv'),
+        os.path.join(project_root, 'DataWithSentimentsResults_HW.csv'),
+        os.path.join(project_root, 'data', 'DataWithSentimentsResults_HW.csv'),
+        os.path.join(project_root, 'HW6', 'DataWithSentimentsResults_HW.csv'),
+        os.path.join(current_dir, 'DataWithSentimentsResults_HW.csv'),
     ]
-    file_path = next((p for p in candidates if os.path.exists(p)), None)
-    if file_path is None:
-        raise FileNotFoundError(f"SP500Data.csv not found. Looked in: {candidates}")
+    return next((p for p in candidates if os.path.exists(p)), None)
 
-    dataset = pd.read_csv(file_path, index_col=0)
 
-    target = 'NVDA'
-    return_period = 5
+def _empty_feature_frame():
+    """Fallback: a single-row frame of zeros with the right columns."""
+    return pd.DataFrame([[0.0] * len(FEATURE_COLUMNS)], columns=FEATURE_COLUMNS)
 
-    SP500_1 = 'IBM_CR_Cum'
-    SP500_2 = 'GOOGL_CR_Cum'
-    IBM_CR_Cum   = json.loads(request_body)[SP500_1]
-    GOOGL_CR_Cum = json.loads(request_body)[SP500_2]
 
-    X = np.log(dataset.drop([target], axis=1)).diff(return_period)
-    X = np.exp(X).cumsum()
-    X.columns = [name + "_CR_Cum" for name in X.columns]
+def extract_features():
+    """Return a single-row DataFrame with the 12 HW6 features.
 
-    X = X.dropna(axis=1, how='all')
-    train_size = int(len(X) * 0.8)
-    X_train = X.iloc[:train_size]
-    all_nan_cols = X_train.columns[X_train.isna().all()].tolist()
-    X = X.drop(columns=all_nan_cols)
+    Tries to pre-fill with the most recent values from
+    DataWithSentimentsResults_HW.csv; if the file isn't available, returns
+    a zero-filled row so the app still launches.
+    """
+    csv_path = _find_sentiment_csv()
+    if csv_path is None:
+        return _empty_feature_frame()
 
-    distances = np.sqrt(
-        (X[SP500_1] - IBM_CR_Cum) ** 2 +
-        (X[SP500_2] - GOOGL_CR_Cum) ** 2
+    try:
+        sent = pd.read_csv(csv_path, sep='|')
+    except Exception:
+        return _empty_feature_frame()
+
+    if not {'ticker', 'date', 'sentiment_textblob'}.issubset(sent.columns):
+        return _empty_feature_frame()
+
+    sent['date'] = pd.to_datetime(sent['date'], errors='coerce')
+    sent = sent.dropna(subset=['date'])
+
+    # Average sentiment per (ticker, date)
+    daily = (
+        sent[['ticker', 'date', 'sentiment_textblob']]
+        .groupby(['ticker', 'date'])
+        .mean()
+        .reset_index()
     )
 
-    closest_index = distances.idxmin()
-    closest_row = X.loc[[closest_index]].copy()
-    closest_row[SP500_1] = IBM_CR_Cum
-    closest_row[SP500_2] = GOOGL_CR_Cum
-    return closest_row
+    # Target series: NFLX sentiment over time
+    target = (
+        daily[daily['ticker'] == TARGET_TICKER]
+        .sort_values('date')
+        .reset_index(drop=True)
+    )
+    if target.empty:
+        return _empty_feature_frame()
+
+    target['sentiment_lag1'] = target['sentiment_textblob'].shift(1)
+    target['sentiment_lag2'] = target['sentiment_textblob'].shift(2)
+    target['sentiment_lag3'] = target['sentiment_textblob'].shift(3)
+
+    # Other tickers' sentiment, pivoted wide
+    others = (
+        daily[daily['ticker'] != TARGET_TICKER]
+        .pivot(index='date', columns='ticker', values='sentiment_textblob')
+        .reset_index()
+    )
+
+    merged = pd.merge(target, others, on='date', how='left').ffill()
+
+    # Make sure every expected column exists, filling with 0 if missing
+    for col in FEATURE_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = 0.0
+
+    last_row = merged[FEATURE_COLUMNS].tail(1).fillna(0.0).reset_index(drop=True)
+    return last_row
