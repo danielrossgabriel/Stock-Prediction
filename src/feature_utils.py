@@ -1,128 +1,139 @@
+"""
+Utility functions for the IEEE-CIS fraud-detection project.
+
+Pulled out of the notebook so they can be reused by the Streamlit app,
+the SageMaker inference handler, and any retraining script.
+"""
+
+import random
+from typing import Optional, Tuple
+
 import numpy as np
 import pandas as pd
-import datetime
-import yfinance as yf
-import pandas_datareader.data as web
-import requests
-#from datetime import datetime, timedelta
-import os
-import sys
 
-import os
-import sys
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, classification_report, confusion_matrix,
+)
 
 
-# ... continue with your script ...
+# ─────────────────────────────────────────────────────────────────────
+# Data loading
+# ─────────────────────────────────────────────────────────────────────
+def sample_csv(path: str,
+               sample_rate: float = 0.10,
+               random_seed: int = 42) -> pd.DataFrame:
+    """Read a random subsample of rows from a (potentially huge) CSV.
 
-def extract_features():
+    Mirrors notebook cell 6 — used to sub-sample the 590k-row
+    `train_transaction.csv` down to ~59k rows for tractable training.
+    Uses `skiprows` so the full file never has to fit in memory.
+    """
+    if not (0 < sample_rate <= 1):
+        raise ValueError("sample_rate must be in (0, 1]")
 
-    return_period = 5
-    
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['MSFT', 'IBM', 'GOOGL']
-    ccy_tickers = ['DEXJPUS', 'DEXUSUK']
-    idx_tickers = ['SP500', 'DJIA', 'VIXCLS']
-    
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
-    #stk_data = web.DataReader(stk_tickers, 'yahoo')
-    ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
-    idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
+    with open(path, "r") as f:
+        total_rows = sum(1 for _ in f) - 1  # subtract header
 
-    Y = np.log(stk_data.loc[:, ('Adj Close', 'MSFT')]).diff(return_period).shift(-return_period)
-    Y.name = Y.name[-1]+'_Future'
-    
-    X1 = np.log(stk_data.loc[:, ('Adj Close', ('GOOGL', 'IBM'))]).diff(return_period)
-    X1.columns = X1.columns.droplevel()
-    X2 = np.log(ccy_data).diff(return_period)
-    X3 = np.log(idx_data).diff(return_period)
+    rng = random.Random(random_seed)
+    rows_to_skip = sorted(
+        rng.sample(
+            range(1, total_rows + 1),
+            int(total_rows * (1 - sample_rate)),
+        )
+    )
 
-    X = pd.concat([X1, X2, X3], axis=1)
-    
-    dataset = pd.concat([Y, X], axis=1).dropna().iloc[::return_period, :]
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.columns]
-    dataset.index.name = 'Date'
-    #dataset.to_csv(r"./test_data.csv")
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    features = features.iloc[:,1:]
-    return features
+    df = pd.read_csv(path, skiprows=rows_to_skip)
+    return df.reset_index(drop=True)
 
-def extract_features_pair():
 
-    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
-    stk_tickers = ['AAPL', 'MPWR']
-    
-    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
+# ─────────────────────────────────────────────────────────────────────
+# Feature engineering helpers (use these inline OR via TransactionFeatureEngineer)
+# ─────────────────────────────────────────────────────────────────────
+def time_features_from_dt(transaction_dt: pd.Series) -> pd.DataFrame:
+    """Return Transaction_hour and Transaction_day from `TransactionDT`.
 
-    Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
-    Y.name = 'AAPL'
+    `TransactionDT` is seconds since a fixed reference point in the
+    IEEE-CIS dataset.
+    """
+    return pd.DataFrame(
+        {
+            "Transaction_hour": np.floor(transaction_dt / 3600) % 24,
+            "Transaction_day":  np.floor(transaction_dt / (3600 * 24)),
+        },
+        index=transaction_dt.index,
+    )
 
-    X = stk_data.loc[:, ('Adj Close', 'MPWR')]
-    X.name = 'MPWR'
 
-    dataset = pd.concat([Y, X], axis=1).dropna()
-    Y = dataset.loc[:, Y.name]
-    X = dataset.loc[:, X.name]
-    dataset.index.name = 'Date'
-    features = dataset.sort_index()
-    features = features.reset_index(drop=True)
-    return features
+def card1_amount_stats(df: pd.DataFrame,
+                       card_col: str = "card1",
+                       amt_col:  str = "TransactionAmt") -> pd.DataFrame:
+    """Per-card mean / std / count of transaction amounts.
 
-def get_bitcoin_historical_prices(days = 60):
-    
-    BASE_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    
-    params = {
-        'vs_currency': 'usd',
-        'days': days,
-        'interval': 'daily' # Ensure we get daily granularity
+    Returns a DataFrame indexed by card value with three columns:
+    `<card>_TransAmt_mean`, `<card>_TransAmt_std`, `<card>_TransAmt_count`.
+    """
+    stats = df.groupby(card_col)[amt_col].agg(["mean", "std", "count"])
+    stats.columns = [
+        f"{card_col}_TransAmt_mean",
+        f"{card_col}_TransAmt_std",
+        f"{card_col}_TransAmt_count",
+    ]
+    return stats
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EDA / reporting
+# ─────────────────────────────────────────────────────────────────────
+def fraud_rate_by(df: pd.DataFrame,
+                  group_col: str,
+                  target_col: str = "isFraud",
+                  top_n: Optional[int] = None) -> pd.Series:
+    """Fraud rate (% fraudulent) per group, sorted descending.
+
+    Powers the EDA charts in notebook cells 16, 17, and 19.
+    """
+    rate = df.groupby(group_col)[target_col].mean() * 100
+    rate = rate.sort_values(ascending=False)
+    return rate.head(top_n) if top_n else rate
+
+
+def evaluate_classifier(name: str,
+                        model,
+                        X_test,
+                        y_test,
+                        target_names: Tuple[str, str] = ("Legitimate", "Fraudulent")) -> dict:
+    """Score a fitted classifier and pretty-print a metrics summary.
+
+    Returns a dict with accuracy, precision, recall, F1, AUC-ROC,
+    and the confusion matrix.
+    """
+    y_pred = model.predict(X_test)
+    proba = (
+        model.predict_proba(X_test)[:, 1]
+        if hasattr(model, "predict_proba") else None
+    )
+
+    metrics = {
+        "name":      name,
+        "accuracy":  accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred, zero_division=0),
+        "recall":    recall_score(y_test, y_pred, zero_division=0),
+        "f1":        f1_score(y_test, y_pred, zero_division=0),
+        "auc_roc":   roc_auc_score(y_test, proba) if proba is not None else None,
+        "confusion": confusion_matrix(y_test, y_pred),
     }
-    response = requests.get(BASE_URL, params=params)
-    data = response.json()
-    prices = data['prices']
-    df = pd.DataFrame(prices, columns=['Timestamp', 'Close Price (USD)'])
-    df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
-    df = df[['Date', 'Close Price (USD)']].set_index('Date')
-    return df
 
-def get_year(col):
-    return pd.to_numeric(col.iloc[:, 0].str[-4:], errors='coerce').to_frame()
+    print(f"\n{'=' * 70}")
+    print(f"  MODEL: {name}")
+    print(f"{'=' * 70}")
+    print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+    print(f"  Precision: {metrics['precision']:.4f}")
+    print(f"  Recall:    {metrics['recall']:.4f}")
+    print(f"  F1 Score:  {metrics['f1']:.4f}")
+    if metrics["auc_roc"] is not None:
+        print(f"  AUC-ROC:   {metrics['auc_roc']:.4f}")
 
-def get_emp_num(col):
-    s = col.iloc[:, 0].str.replace('10+ years', '10', regex=False).str.replace('< 1 year', '0', regex=False)
-    return pd.to_numeric(s.str.split().str[0], errors='coerce').to_frame()
-
-def get_term_num(col):
-    return pd.to_numeric(col.iloc[:, 0].str.replace(' months', '', regex=False), errors='coerce').to_frame()
-
-def run_strategy(data_df_ticker):
-    initial_capital = 100000  # Initial capital for trading
-    capital = initial_capital
-    position = 0  # No initial position
-    portfolio_value_current = 0
-    
-    # Track portfolio value over time
-    portfolio_value = []
-    
-    for i in range(1, len(data_df_ticker)):
-        # Buy
-        if data_df_ticker['Buy_Signal'][i] and capital > 0:
-            position = capital / data_df_ticker['Close'][i]
-            capital = 0  # No remaining capital
-    
-        # Sell
-        elif data_df_ticker['Sell_Signal'][i] and position > 0:
-            capital = position * data_df_ticker['Close'][i]
-            position = 0
-    
-        # Track portfolio value
-        if position == 0:
-            portfolio_value_current = capital
-        elif position > 0:
-            portfolio_value_current =  position * data_df_ticker['Close'][i]
-            
-        portfolio_value.append(portfolio_value_current)
-    return portfolio_value
+    print("\n  Classification Report:")
+    print(classification_report(y_test, y_pred, target_names=list(target_names)))
+    return metrics
