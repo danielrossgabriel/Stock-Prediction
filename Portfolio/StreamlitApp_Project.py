@@ -1,181 +1,245 @@
-import os, sys, warnings
+import os
+import sys
+import warnings
+import posixpath
+import tempfile
+import tarfile
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
-import posixpath
 
 import joblib
-import tarfile
-import tempfile
+from joblib import load
 
 import boto3
 import sagemaker
 from sagemaker.predictor import Predictor
-from sagemaker.serializers import CSVSerializer
 from sagemaker.serializers import JSONSerializer
 from sagemaker.deserializers import JSONDeserializer
-from sagemaker.serializers import NumpySerializer
-from sagemaker.deserializers import NumpyDeserializer
 
-
-from sklearn.pipeline import Pipeline
 import shap
 
-from joblib import dump
-from joblib import load
 
-
-
-# Setup & Path Configuration
+# ─────────────────────────────────────────────────────────────────────
+# Setup
+# ─────────────────────────────────────────────────────────────────────
 warnings.simplefilter("ignore")
 
-# Fix path for Streamlit Cloud (ensure 'src' is findable)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, '..'))
+current_dir  = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-#from src.feature_utils import extract_features
-#from src.Custom_Classes import DropHighMissingCols, TransactionFeatureEngineer, DropHighCorrelation
+# Reference dataset — must contain exactly the columns the model was trained on
+# (the X_train you saved out of the notebook after cells 22-29).
+file_path = os.path.join(project_root, "Portfolio/X_train.csv")
+dataset   = pd.read_csv(file_path)
+dataset   = dataset.loc[:, ~dataset.columns.str.contains("^Unnamed")]
 
-file_path = os.path.join(project_root, 'Portfolio/X_train.csv')
 
-dataset = pd.read_csv(file_path)
-dataset = dataset.drop(['Unnamed: 0'],axis=1)
-#dataset = dataset.loc[:, ~dataset.columns.str.contains('^Unnamed')]
-
-# Access the secrets
-aws_id = st.secrets["aws_credentials"]["AWS_ACCESS_KEY_ID"]
-aws_secret = st.secrets["aws_credentials"]["AWS_SECRET_ACCESS_KEY"]
-aws_token = st.secrets["aws_credentials"]["AWS_SESSION_TOKEN"]
-aws_bucket = st.secrets["aws_credentials"]["AWS_BUCKET"]
+# ─────────────────────────────────────────────────────────────────────
+# AWS credentials (Streamlit secrets)
+# ─────────────────────────────────────────────────────────────────────
+aws_id       = st.secrets["aws_credentials"]["AWS_ACCESS_KEY_ID"]
+aws_secret   = st.secrets["aws_credentials"]["AWS_SECRET_ACCESS_KEY"]
+aws_token    = st.secrets["aws_credentials"]["AWS_SESSION_TOKEN"]
+aws_bucket   = st.secrets["aws_credentials"]["AWS_BUCKET"]
 aws_endpoint = st.secrets["aws_credentials"]["AWS_ENDPOINT"]
 
-# AWS Session Management
-@st.cache_resource # Use this to avoid downloading the file every time the page refreshes
+
+@st.cache_resource
 def get_session(aws_id, aws_secret, aws_token):
     return boto3.Session(
         aws_access_key_id=aws_id,
         aws_secret_access_key=aws_secret,
         aws_session_token=aws_token,
-        region_name='us-east-1'
+        region_name="us-east-1",
     )
 
-session = get_session(aws_id, aws_secret, aws_token)
+
+session    = get_session(aws_id, aws_secret, aws_token)
 sm_session = sagemaker.Session(boto_session=session)
 
-# Data & Model Configuration
 
+# ─────────────────────────────────────────────────────────────────────
+# Model / feature config
+# ─────────────────────────────────────────────────────────────────────
+# Only a handful of features are exposed in the UI; every other column
+# falls back to the first row of the reference dataset so the endpoint
+# always receives the full feature set the model expects.
 MODEL_INFO = {
-    "endpoint"  : aws_endpoint,
-    "explainer" : "explainer_sentiment.shap",
-    "pipeline"  : "finalized_fraud_model.tar.gz",
-    "keys"      : ['TransactionAmt','card6_freq_enc','card3','C12'],
-    "inputs"    : [{"name": k, "type": "number", "min": -1.0, "max": 1.0, "default": 0.0, "step": 0.01} for k in ['TransactionAmt','card6_freq_enc','card3','C12']]
+    "endpoint"       : aws_endpoint,
+    "explainer"      : "explainer_pca.shap",
+    "model_archive"  : "finalized_loan_model.tar.gz",
+    "model_joblib"   : "finalized_loan_model.joblib",
+    "model_s3_prefix": "sklearn-pipeline-deployment",
+    "inputs": [
+        # name, min, max, default, step  — ranges chosen for raw IEEE-CIS values
+        {"name": "TransactionAmt", "min":   0.0, "max": 10000.0, "default": 100.0, "step":   1.0},
+        {"name": "card3",          "min":   0.0, "max":   500.0, "default": 150.0, "step":   1.0},
+        {"name": "card6",          "min":   0.0, "max":     5.0, "default":   2.0, "step":   1.0},  # label-encoded
+        {"name": "C12",            "min":   0.0, "max":   100.0, "default":   0.0, "step":   1.0},
+    ],
 }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# S3 helpers (cached so the page doesn't redownload on every interaction)
+# ─────────────────────────────────────────────────────────────────────
+@st.cache_resource
 def load_pipeline(_session, bucket, key):
-    s3_client = _session.client('s3')
-    filename=MODEL_INFO["pipeline"]
+    """Download and return the trained model from S3."""
+    s3_client = _session.client("s3")
+    archive   = MODEL_INFO["model_archive"]
+    local_arc = os.path.join(tempfile.gettempdir(), archive)
 
     s3_client.download_file(
-        Filename=filename,
+        Filename=local_arc,
         Bucket=bucket,
-        Key= f"{key}/{os.path.basename(filename)}")
-        # Extract the .joblib file from the .tar.gz
-    with tarfile.open(filename, "r:gz") as tar:
-        tar.extractall(path=".")
-        joblib_file = [f for f in tar.getnames() if f.endswith('.joblib')][0]
-        #joblib_file = [f for f in tar.getnames() if f.endswith('.pkl')][0]
-   
+        Key=f"{key}/{os.path.basename(archive)}",
+    )
 
-    # Load the full pipeline
-    return joblib.load(f"{joblib_file}")
+    extract_dir = tempfile.mkdtemp()
+    with tarfile.open(local_arc, "r:gz") as tar:
+        tar.extractall(path=extract_dir)
+        joblib_name = next(f for f in tar.getnames() if f.endswith(".joblib"))
 
+    return joblib.load(os.path.join(extract_dir, joblib_name))
+
+
+@st.cache_resource
 def load_shap_explainer(_session, bucket, key, local_path):
-    s3_client = _session.client('s3')
-    local_path = local_path
-
-    # Only download if it doesn't exist locally to save time
+    """Download and return the SHAP explainer (cached after first load)."""
+    s3_client = _session.client("s3")
     if not os.path.exists(local_path):
         s3_client.download_file(Filename=local_path, Bucket=bucket, Key=key)
-       
     with open(local_path, "rb") as f:
         return load(f)
-        #return shap.Explainer.load(f)
 
-# Prediction Logic
+
+# ─────────────────────────────────────────────────────────────────────
+# Prediction
+# ─────────────────────────────────────────────────────────────────────
 def call_model_api(input_df):
-
+    """Send a single-row DataFrame to the SageMaker endpoint."""
     predictor = Predictor(
         endpoint_name=MODEL_INFO["endpoint"],
         sagemaker_session=sm_session,
         serializer=JSONSerializer(),
-        deserializer=NumpyDeserializer()
+        deserializer=JSONDeserializer(),
     )
 
+    # The inference handler accepts a list of records; that keeps the
+    # column names attached on the server side.
+    payload = input_df.to_dict(orient="records")
+
     try:
-        raw_pred = predictor.predict(input_df)
-        pred_val = pd.DataFrame(raw_pred).values[-1][0]
-        #mapping = {0: "SELL", 1: "HOLD", 2: "BUY"}
-        mapping = {0: "Legitimate", 1: "Fraud"}
-        return mapping.get(pred_val), 200
+        result = predictor.predict(payload)
+        # result is {"prediction": [0/1, ...], "fraud_probability": [float, ...]}
+        label_id = int(result["prediction"][0])
+        proba    = float(result["fraud_probability"][0])
+        mapping  = {0: "Legitimate", 1: "Fraud"}
+        return {"label": mapping.get(label_id, str(label_id)), "proba": proba}, 200
     except Exception as e:
         return f"Error: {str(e)}", 500
 
-# Local Explainability
-def display_explanation(input_df, session, aws_bucket):
-    explainer_name = MODEL_INFO["explainer"]
-    explainer = load_shap_explainer(session, aws_bucket, posixpath.join('explainer', explainer_name),os.path.join(tempfile.gettempdir(), explainer_name))
-   
-    best_pipeline = load_pipeline(session, aws_bucket, 'sklearn-pipeline-deployment')
-    preprocessing_pipeline = Pipeline(steps=best_pipeline.steps[:-2])
-    input_df=pd.DataFrame(input_df)
-    input_df_transformed = preprocessing_pipeline.transform(input_df)
-    #feature_names = best_pipeline[:-3].get_feature_names_out()
-    dataset_1 = dataset.iloc[:, 0:]
-    feature_names = dataset_1.columns[1:]
-    selector = best_pipeline.named_steps['selector']
-    selected_features = feature_names[selector.get_support()]
-    input_df_transformed = pd.DataFrame(input_df_transformed, columns=selected_features)
-    #input_df_transformed = pd.DataFrame(input_df_transformed)
-    shap_values = explainer(input_df_transformed)
-   
-    st.subheader("🔍 Decision Transparency (SHAP)")
-    fig, ax = plt.subplots(figsize=(10, 4))
-    shap.plots.waterfall(shap_values[0, :, 1])  # class 1 = fraud
-    st.pyplot(fig)
-    top_feature = pd.Series(shap_values[0, :, 1].values, index=shap_values[0, :, 1].feature_names).abs().idxmax()
-    st.info(f"**Business Insight:** The most influential factor in this decision was **{top_feature}**.")
+
+# ─────────────────────────────────────────────────────────────────────
+# SHAP explanation
+# ─────────────────────────────────────────────────────────────────────
+def display_explanation(input_df):
+    """Render a SHAP waterfall plot for the fraud (class 1) prediction."""
+    try:
+        explainer = load_shap_explainer(
+            session,
+            aws_bucket,
+            posixpath.join("explainer", MODEL_INFO["explainer"]),
+            os.path.join(tempfile.gettempdir(), MODEL_INFO["explainer"]),
+        )
+
+        shap_values = explainer(input_df)
+
+        st.subheader("🔍 Decision Transparency (SHAP)")
+        fig, _ = plt.subplots(figsize=(10, 4))
+
+        # For binary classifiers SHAP returns shape (n_samples, n_features, n_classes).
+        # We slice to row 0, all features, class 1 (fraud).
+        sv = shap_values[0]
+        if hasattr(sv, "values") and sv.values.ndim == 2:
+            sv = sv[:, 1]
+        shap.plots.waterfall(sv, show=False)
+        st.pyplot(fig)
+
+        # Highlight the single biggest driver
+        top_feature = (
+            pd.Series(sv.values, index=sv.feature_names).abs().idxmax()
+        )
+        st.info(
+            f"**Business Insight:** The most influential factor in this "
+            f"decision was **{top_feature}**."
+        )
+    except Exception as e:
+        st.warning(f"Could not render SHAP explanation: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────────
 # Streamlit UI
-st.set_page_config(page_title="ML Deployment", layout="wide")
-st.title("👨‍💻 ML Deployment")
+# ─────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Fraud Detection — ML Deployment", layout="wide")
+st.title("💳 Fraud Detection — ML Deployment")
+st.caption(
+    "Tuned tree-based classifier (Random Forest / Gradient Boosting) "
+    "trained on the IEEE-CIS transaction dataset. Endpoint hosted on "
+    "Amazon SageMaker."
+)
 
 with st.form("pred_form"):
-    st.subheader(f"Inputs")
-    cols = st.columns(2)
-    user_inputs = {}
-   
+    st.subheader("Transaction Inputs")
+    cols         = st.columns(2)
+    user_inputs  = {}
+
     for i, inp in enumerate(MODEL_INFO["inputs"]):
         with cols[i % 2]:
-            user_inputs[inp['name']] = st.number_input(
-                inp['name'].replace('_', ' ').upper(),
-                min_value=inp['min'], max_value=inp['max'], value=inp['default'], step=inp['step']
+            user_inputs[inp["name"]] = st.number_input(
+                inp["name"].replace("_", " ").upper(),
+                min_value=float(inp["min"]),
+                max_value=float(inp["max"]),
+                value=float(inp["default"]),
+                step=float(inp["step"]),
             )
-   
+
     submitted = st.form_submit_button("Run Prediction")
 
-original = dataset.iloc[0:1].to_dict()
-original.update(user_inputs)
 if submitted:
+    # Build the full feature row: start from the first row of X_train,
+    # then overwrite the four user-controlled columns.
+    row = dataset.iloc[0:1].copy()
+    for name, val in user_inputs.items():
+        if name in row.columns:
+            row[name] = val
+        else:
+            st.warning(
+                f"Feature `{name}` was not found in X_train.csv — "
+                "ignoring it. Check the inputs config."
+            )
 
-    res, status = call_model_api(original)
+    res, status = call_model_api(row)
+
     if status == 200:
-        st.metric("Prediction Result", res)
-        display_explanation(original,session, aws_bucket)
+        c1, c2 = st.columns(2)
+        c1.metric("Prediction", res["label"])
+        c2.metric("Fraud Probability", f"{res['proba']:.2%}")
+
+        if res["label"] == "Fraud":
+            st.error(
+                "⚠️ Flagged as fraudulent. Recommend manual review before "
+                "authorization."
+            )
+        else:
+            st.success("✅ Looks legitimate.")
+
+        display_explanation(row)
     else:
         st.error(res)
