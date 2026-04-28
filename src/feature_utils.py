@@ -1,99 +1,128 @@
-"""Feature extraction utilities for the HW6 Streamlit app.
-
-Builds the 12-column feature vector that the HW6 regression model was
-trained on in the notebook:
-
-    sentiment_textblob, sentiment_lag1, sentiment_lag2, sentiment_lag3,
-    AAPL, MSFT, AMZN, GOOG, WMT, JPM, TSLA, ADBE
-
-Target ticker is NFLX (excluded from the other-ticker columns).
-"""
+import numpy as np
+import pandas as pd
+import datetime
+import yfinance as yf
+import pandas_datareader.data as web
+import requests
+#from datetime import datetime, timedelta
+import os
+import sys
 
 import os
-import pandas as pd
+import sys
 
 
-# Columns the HW6 model expects, in order
-TARGET_TICKER = 'NFLX'
-OTHER_TICKERS = ['AAPL', 'MSFT', 'AMZN', 'GOOG', 'WMT', 'JPM', 'TSLA', 'ADBE']
-SENTIMENT_COLS = ['sentiment_textblob', 'sentiment_lag1', 'sentiment_lag2', 'sentiment_lag3']
-FEATURE_COLUMNS = SENTIMENT_COLS + OTHER_TICKERS
-
-
-def _find_sentiment_csv():
-    """Look for DataWithSentimentsResults_HW.csv in a few plausible spots."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, '..'))
-    candidates = [
-        os.path.join(project_root, 'DataWithSentimentsResults_HW.csv'),
-        os.path.join(project_root, 'data', 'DataWithSentimentsResults_HW.csv'),
-        os.path.join(project_root, 'HW6', 'DataWithSentimentsResults_HW.csv'),
-        os.path.join(current_dir, 'DataWithSentimentsResults_HW.csv'),
-    ]
-    return next((p for p in candidates if os.path.exists(p)), None)
-
-
-def _empty_feature_frame():
-    """Fallback: a single-row frame of zeros with the right columns."""
-    return pd.DataFrame([[0.0] * len(FEATURE_COLUMNS)], columns=FEATURE_COLUMNS)
-
+# ... continue with your script ...
 
 def extract_features():
-    """Return a single-row DataFrame with the 12 HW6 features.
 
-    Tries to pre-fill with the most recent values from
-    DataWithSentimentsResults_HW.csv; if the file isn't available, returns
-    a zero-filled row so the app still launches.
-    """
-    csv_path = _find_sentiment_csv()
-    if csv_path is None:
-        return _empty_feature_frame()
+    return_period = 5
+    
+    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
+    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
+    stk_tickers = ['MSFT', 'IBM', 'GOOGL']
+    ccy_tickers = ['DEXJPUS', 'DEXUSUK']
+    idx_tickers = ['SP500', 'DJIA', 'VIXCLS']
+    
+    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
+    #stk_data = web.DataReader(stk_tickers, 'yahoo')
+    ccy_data = web.DataReader(ccy_tickers, 'fred', start=START_DATE, end=END_DATE)
+    idx_data = web.DataReader(idx_tickers, 'fred', start=START_DATE, end=END_DATE)
 
-    try:
-        sent = pd.read_csv(csv_path, sep='|')
-    except Exception:
-        return _empty_feature_frame()
+    Y = np.log(stk_data.loc[:, ('Adj Close', 'MSFT')]).diff(return_period).shift(-return_period)
+    Y.name = Y.name[-1]+'_Future'
+    
+    X1 = np.log(stk_data.loc[:, ('Adj Close', ('GOOGL', 'IBM'))]).diff(return_period)
+    X1.columns = X1.columns.droplevel()
+    X2 = np.log(ccy_data).diff(return_period)
+    X3 = np.log(idx_data).diff(return_period)
 
-    if not {'ticker', 'date', 'sentiment_textblob'}.issubset(sent.columns):
-        return _empty_feature_frame()
+    X = pd.concat([X1, X2, X3], axis=1)
+    
+    dataset = pd.concat([Y, X], axis=1).dropna().iloc[::return_period, :]
+    Y = dataset.loc[:, Y.name]
+    X = dataset.loc[:, X.columns]
+    dataset.index.name = 'Date'
+    #dataset.to_csv(r"./test_data.csv")
+    features = dataset.sort_index()
+    features = features.reset_index(drop=True)
+    features = features.iloc[:,1:]
+    return features
 
-    sent['date'] = pd.to_datetime(sent['date'], errors='coerce')
-    sent = sent.dropna(subset=['date'])
+def extract_features_pair():
 
-    # Average sentiment per (ticker, date)
-    daily = (
-        sent[['ticker', 'date', 'sentiment_textblob']]
-        .groupby(['ticker', 'date'])
-        .mean()
-        .reset_index()
-    )
+    START_DATE = (datetime.date.today() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
+    END_DATE = datetime.date.today().strftime("%Y-%m-%d")
+    stk_tickers = ['AAPL', 'MPWR']
+    
+    stk_data = yf.download(stk_tickers, start=START_DATE, end=END_DATE, auto_adjust=False)
 
-    # Target series: NFLX sentiment over time
-    target = (
-        daily[daily['ticker'] == TARGET_TICKER]
-        .sort_values('date')
-        .reset_index(drop=True)
-    )
-    if target.empty:
-        return _empty_feature_frame()
+    Y = stk_data.loc[:, ('Adj Close', 'AAPL')]
+    Y.name = 'AAPL'
 
-    target['sentiment_lag1'] = target['sentiment_textblob'].shift(1)
-    target['sentiment_lag2'] = target['sentiment_textblob'].shift(2)
-    target['sentiment_lag3'] = target['sentiment_textblob'].shift(3)
+    X = stk_data.loc[:, ('Adj Close', 'MPWR')]
+    X.name = 'MPWR'
 
-    # Other tickers' sentiment, pivoted wide
-    others = (
-        daily[daily['ticker'] != TARGET_TICKER]
-        .pivot(index='date', columns='ticker', values='sentiment_textblob')
-        .reset_index()
-    )
+    dataset = pd.concat([Y, X], axis=1).dropna()
+    Y = dataset.loc[:, Y.name]
+    X = dataset.loc[:, X.name]
+    dataset.index.name = 'Date'
+    features = dataset.sort_index()
+    features = features.reset_index(drop=True)
+    return features
 
-    merged = pd.merge(target, others, on='date', how='left').ffill()
+def get_bitcoin_historical_prices(days = 60):
+    
+    BASE_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    
+    params = {
+        'vs_currency': 'usd',
+        'days': days,
+        'interval': 'daily' # Ensure we get daily granularity
+    }
+    response = requests.get(BASE_URL, params=params)
+    data = response.json()
+    prices = data['prices']
+    df = pd.DataFrame(prices, columns=['Timestamp', 'Close Price (USD)'])
+    df['Date'] = pd.to_datetime(df['Timestamp'], unit='ms').dt.normalize()
+    df = df[['Date', 'Close Price (USD)']].set_index('Date')
+    return df
 
-    # Make sure every expected column exists, filling with 0 if missing
-    for col in FEATURE_COLUMNS:
-        if col not in merged.columns:
-            merged[col] = 0.0
+def get_year(col):
+    return pd.to_numeric(col.iloc[:, 0].str[-4:], errors='coerce').to_frame()
 
-    last_row = merged[FEATURE_COLUMNS].tail(1).fillna(0.0).reset_index(drop=True)
-    return last_row
+def get_emp_num(col):
+    s = col.iloc[:, 0].str.replace('10+ years', '10', regex=False).str.replace('< 1 year', '0', regex=False)
+    return pd.to_numeric(s.str.split().str[0], errors='coerce').to_frame()
+
+def get_term_num(col):
+    return pd.to_numeric(col.iloc[:, 0].str.replace(' months', '', regex=False), errors='coerce').to_frame()
+
+def run_strategy(data_df_ticker):
+    initial_capital = 100000  # Initial capital for trading
+    capital = initial_capital
+    position = 0  # No initial position
+    portfolio_value_current = 0
+    
+    # Track portfolio value over time
+    portfolio_value = []
+    
+    for i in range(1, len(data_df_ticker)):
+        # Buy
+        if data_df_ticker['Buy_Signal'][i] and capital > 0:
+            position = capital / data_df_ticker['Close'][i]
+            capital = 0  # No remaining capital
+    
+        # Sell
+        elif data_df_ticker['Sell_Signal'][i] and position > 0:
+            capital = position * data_df_ticker['Close'][i]
+            position = 0
+    
+        # Track portfolio value
+        if position == 0:
+            portfolio_value_current = capital
+        elif position > 0:
+            portfolio_value_current =  position * data_df_ticker['Close'][i]
+            
+        portfolio_value.append(portfolio_value_current)
+    return portfolio_value
